@@ -180,6 +180,11 @@ public class PropertiesHandler {
 			return this;
 		}
 
+		public <T> Builder addConfigOption(String key, T defaultValue) {
+			configValues.put(key, String.valueOf(defaultValue));
+			return this;
+		}
+
 		public Builder setFileName(String fileName) {
 			if (!fileName.endsWith(".properties")) {
 				fileName += ".properties";

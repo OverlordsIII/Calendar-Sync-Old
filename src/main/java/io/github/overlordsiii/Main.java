@@ -9,6 +9,7 @@ import java.nio.file.Paths;
 import java.security.GeneralSecurityException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 import com.google.api.client.auth.oauth2.Credential;
@@ -30,6 +31,13 @@ import io.github.overlordsiii.config.PropertiesHandler;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 
+// TODO Goals
+// Make it so that we actually check the secondary calendar id
+// if it exists, we don't just want to blindly create a new calendar
+// rather we want to store all the event ids we copied from the old calendar to the new calendar
+// and then iterate through all events and check if those events are in our event id store
+// if not, then we add them to our existing calendar
+// otherwise we add all events to a brand new calendar
 public class Main {
 	public static final Logger LOGGER = LogManager.getLogger("WhenIWorkCalendarSync");
 
@@ -48,6 +56,9 @@ public class Main {
 		.builder()
 		.addConfigOption("secondary-calendar-id", "")
 		.addConfigOption("primary-calendar-id", "")
+		.addConfigOption("google-redirect-path", "/Callback")
+		.addConfigOption("google-redirect-host", "localhost")
+		.addConfigOption("google-redirect-port", 8888)
 		.setFileName("calendar-sync.properties")
 		.build();
 
@@ -63,6 +74,7 @@ public class Main {
 				.build();
 
 		String cbeId = getCBECalendarId();
+		Objects.requireNonNull(cbeId, "Could not find the CBE Calendar that should be imported from WhenIWork!");
 		CONFIG.setConfigOption("primary-calendar-id", cbeId);
 		CONFIG.reload();
 		String secondaryCalendar = getOrCreateCopy(cbeId);
@@ -78,7 +90,7 @@ public class Main {
 		calendar = SERVICE.calendars().insert(calendar).execute();
 
 		for (Event event : getAllEvents(cbeId)) {
-			Main.LOGGER.info("Copying event: " + event.getSummary());
+			Main.LOGGER.info("Copying event: " + event.getSummary() + " at " + event.getStart());
 
 			boolean archnet = event.getSummary().contains("ArchNet");
 
@@ -154,7 +166,11 @@ public class Main {
 			.setDataStoreFactory(new FileDataStoreFactory(TOKENS_DIRECTORY_PATH.toFile()))
 			.setAccessType("offline")
 			.build();
-		LocalServerReceiver receiver = new LocalServerReceiver.Builder().setPort(8888).build();
+		LocalServerReceiver receiver = new LocalServerReceiver.Builder()
+				.setCallbackPath(CONFIG.getConfigOption("google-redirect-path"))
+				.setHost(CONFIG.getConfigOption("google-redirect-host"))
+				.setPort(CONFIG.getConfigOption("google-redirect-port", Integer::parseInt))
+				.build();
 		return new AuthorizationCodeInstalledApp(flow, receiver).authorize("user");
 	}
 
