@@ -32,12 +32,18 @@ import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 
 // TODO Goals
-// Make it so that we actually check the secondary calendar id
+// 1. Make it so that we actually check the secondary calendar id
 // if it exists, we don't just want to blindly create a new calendar
 // rather we want to store all the event ids we copied from the old calendar to the new calendar
 // and then iterate through all events and check if those events are in our event id store
 // if not, then we add them to our existing calendar
 // otherwise we add all events to a brand new calendar
+// if event was deleted then we also want to track that if its not in the current event store and then remove it
+// from our event list
+// 2. fix gradle build to shadowjar all deps and run as an executable
+// 3. add all naming/magic numbers as configurable constants (besides configuration names themselves)
+// 4. instead of copying each event, take union of events
+// ie if we have mutliple shifts that all have a collective range from 9-3, just make one block for 9-3 coverage
 public class Main {
 	public static final Logger LOGGER = LogManager.getLogger("WhenIWorkCalendarSync");
 
@@ -75,8 +81,11 @@ public class Main {
 
 		String cbeId = getCBECalendarId();
 		Objects.requireNonNull(cbeId, "Could not find the CBE Calendar that should be imported from WhenIWork!");
-		CONFIG.setConfigOption("primary-calendar-id", cbeId);
-		CONFIG.reload();
+		if (!cbeId.equals(CONFIG.getConfigOption("primary-calendar-id"))) {
+			LOGGER.info("Found new calendar ID " + cbeId +", updating...");
+			CONFIG.setConfigOption("primary-calendar-id", cbeId);
+			CONFIG.reload();
+		}
 		String secondaryCalendar = getOrCreateCopy(cbeId);
 		CONFIG.setConfigOption("secondary-calendar-id", secondaryCalendar);
 		CONFIG.reload();

@@ -84,6 +84,15 @@ public class PropertiesHandler {
 		return new Builder();
 	}
 
+
+	private static String verifyNonEmpty(String str) {
+		if (str.isEmpty()) {
+			return null;
+		}
+
+		return str;
+	}
+
 	public void setConfigOption(String option, String newValue) {
 		configValues.replace(option, newValue);
 	}
@@ -99,11 +108,11 @@ public class PropertiesHandler {
 	}
 
 	public <T> T getConfigOption(String key, Function<String, T> parser) {
-		return parser.apply(configValues.get(key));
+		return parser.apply(getConfigOption(key));
 	}
 
 	public String getConfigOption(String key) {
-		return configValues.get(key);
+		return verifyNonEmpty(configValues.get(key));
 	}
 
 	public boolean hasConfigOption(String key) {
