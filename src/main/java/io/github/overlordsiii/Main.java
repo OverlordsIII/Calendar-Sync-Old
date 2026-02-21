@@ -7,10 +7,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.GeneralSecurityException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
-import java.util.Set;
+import java.util.*;
 
 import com.google.api.client.auth.oauth2.Credential;
 import com.google.api.client.extensions.java6.auth.oauth2.AuthorizationCodeInstalledApp;
@@ -27,17 +24,12 @@ import com.google.api.services.calendar.CalendarScopes;
 import com.google.api.services.calendar.model.CalendarListEntry;
 import com.google.api.services.calendar.model.Event;
 import com.google.api.services.calendar.model.Events;
+import io.github.overlordsiii.config.EventColor;
 import io.github.overlordsiii.config.PropertiesHandler;
+import io.github.overlordsiii.config.TimeZone;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 
-// TODO Goals
-// Make it so that we actually check the secondary calendar id
-// if it exists, we don't just want to blindly create a new calendar
-// rather we want to store all the event ids we copied from the old calendar to the new calendar
-// and then iterate through all events and check if those events are in our event id store
-// if not, then we add them to our existing calendar
-// otherwise we add all events to a brand new calendar
 public class Main {
 	public static final Logger LOGGER = LogManager.getLogger("WhenIWorkCalendarSync");
 
@@ -59,6 +51,11 @@ public class Main {
 		.addConfigOption("google-redirect-path", "/Callback")
 		.addConfigOption("google-redirect-host", "localhost")
 		.addConfigOption("google-redirect-port", 8888)
+		.addConfigOption("application-name", "WhenIWorkCalendarSync")
+		.addConfigOption("calendar-name", "CBE-IT Schedule")
+		.addConfigOption("time-zone", TimeZone.PACIFIC)
+		.addConfigOption("arch-event-color", EventColor.RED)
+		.addConfigOption("dc-event-color", EventColor.PALE_BLUE)
 		.setFileName("calendar-sync.properties")
 		.build();
 
@@ -70,43 +67,63 @@ public class Main {
 		final NetHttpTransport HTTP_TRANSPORT = GoogleNetHttpTransport.newTrustedTransport();
 		SERVICE =
 			new Calendar.Builder(HTTP_TRANSPORT, JSON_FACTORY, getCredentials(HTTP_TRANSPORT))
-				.setApplicationName("WhenIWorkCalendarSync")
+				.setApplicationName(CONFIG.getConfigOption("application-name"))
 				.build();
 
 		String cbeId = getCBECalendarId();
 		Objects.requireNonNull(cbeId, "Could not find the CBE Calendar that should be imported from WhenIWork!");
 		CONFIG.setConfigOption("primary-calendar-id", cbeId);
 		CONFIG.reload();
-		String secondaryCalendar = getOrCreateCopy(cbeId);
-		CONFIG.setConfigOption("secondary-calendar-id", secondaryCalendar);
+		if (CONFIG.hasConfigOption("secondary-calendar-id")) {
+			deleteAllEvents(CONFIG.getConfigOption("secondary-calendar-id"));
+		} else {
+			String secondaryCalendar = createCalendar();
+			CONFIG.setConfigOption("secondary-calendar-id", secondaryCalendar);
+		}
+		copyEventsFromCalendarToCalendar(cbeId, CONFIG.getConfigOption("secondary-calendar-id"));
 		CONFIG.reload();
 	}
 
-	private static String getOrCreateCopy(String cbeId) throws IOException {
+	private static void deleteAllEvents(String calendarId) throws IOException {
+		SERVICE.calendars().clear(calendarId).execute();
+	}
+
+	private static <T extends Enum<T>> T parseEnumSafe(String str, Class<T> clazz) {
+		try {
+			return Enum.valueOf(clazz, str);
+		} catch (IllegalArgumentException e) {
+			LOGGER.error("Error while parsing enum constants, please make sure you pass one of the following: " + Arrays.deepToString(clazz.getEnumConstants()));
+			throw new IllegalArgumentException("Illegal enum constant passed - please check logs for correct constants!");
+		}
+    }
+
+	private static String createCalendar() throws IOException {
 		com.google.api.services.calendar.model.Calendar calendar = new com.google.api.services.calendar.model.Calendar();
-		calendar.setSummary("CBE-IT Schedule");
-		calendar.setTimeZone("America/Los_Angeles");
+		calendar.setSummary(CONFIG.getConfigOption("calendar-name"));
+		calendar.setTimeZone(CONFIG.getConfigOption("time-zone", str -> parseEnumSafe(str, TimeZone.class).getZone()));
 
 		calendar = SERVICE.calendars().insert(calendar).execute();
 
-		for (Event event : getAllEvents(cbeId)) {
+		return calendar.getId();
+	}
+
+	private static void copyEventsFromCalendarToCalendar(String sourceCalendarId, String destCalendarId) throws IOException {
+		for (Event event : getAllEvents(sourceCalendarId)) {
 			Main.LOGGER.info("Copying event: " + event.getSummary() + " at " + event.getStart());
 
 			boolean archnet = event.getSummary().contains("ArchNet");
+
+			String configKey = archnet ? "arch-event-color" : "dc-event-color";
 
 			Event newEvent = new Event()
 				.setSummary(archnet ? "ArchNet" : "Digital Commons")
 				.setDescription(event.getDescription())
 				.setStart(event.getStart())
 				.setEnd(event.getEnd())
-				.setColorId(archnet ? "11" : "1");
+				.setColorId(CONFIG.getConfigOption(configKey, str -> parseEnumSafe(str, EventColor.class).getId()));
 
-			SERVICE.events().insert(calendar.getId(), newEvent).execute();
+			SERVICE.events().insert(destCalendarId, newEvent).execute();
 		}
-
-
-
-		return calendar.getId();
 	}
 
 	private static String getCBECalendarId() throws IOException {
