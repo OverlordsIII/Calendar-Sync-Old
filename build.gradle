@@ -20,7 +20,7 @@ dependencies {
 }
 
 shadowJar {
-    archiveBaseName.set("calendar-app")
+    archiveBaseName.set("when-i-work-calendar-sync")
     archiveClassifier.set("")
     archiveVersion.set("")
 

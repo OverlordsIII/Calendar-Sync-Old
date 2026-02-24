@@ -7,6 +7,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.GeneralSecurityException;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.*;
 
 import com.google.api.client.auth.oauth2.Credential;
@@ -24,9 +27,13 @@ import com.google.api.services.calendar.CalendarScopes;
 import com.google.api.services.calendar.model.CalendarListEntry;
 import com.google.api.services.calendar.model.Event;
 import com.google.api.services.calendar.model.Events;
+import io.github.overlordsiii.api.Shift;
 import io.github.overlordsiii.config.EventColor;
 import io.github.overlordsiii.config.PropertiesHandler;
 import io.github.overlordsiii.config.TimeZone;
+import io.github.overlordsiii.util.CalendarUtil;
+import io.github.overlordsiii.util.TimeUtil;
+import io.github.overlordsiii.util.Util;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 
@@ -66,17 +73,21 @@ public class Main {
 		.addConfigOption("google-redirect-port", 8888)
 		.addConfigOption("application-name", "WhenIWorkCalendarSync")
 		.addConfigOption("calendar-name", "CBE-IT Schedule")
+		// needs to be time zone of all events too
 		.addConfigOption("time-zone", TimeZone.PACIFIC)
 		.addConfigOption("arch-event-color", EventColor.RED)
 		.addConfigOption("dc-event-color", EventColor.PALE_BLUE)
+		.addConfigOption("description", "Calendar that gives general availability for DC/Archnet Locations")
 		.setFileName("calendar-sync.properties")
 		.build();
 
-
 	private static final JsonFactory JSON_FACTORY = GsonFactory.getDefaultInstance();
-	public static void main(String[] args) throws IOException, GeneralSecurityException {
-		initConfigs();
 
+	static {
+		Util.initConfigs();
+	}
+
+	public static void main(String[] args) throws IOException, GeneralSecurityException {
 		final NetHttpTransport HTTP_TRANSPORT = GoogleNetHttpTransport.newTrustedTransport();
 		SERVICE =
 			new Calendar.Builder(HTTP_TRANSPORT, JSON_FACTORY, getCredentials(HTTP_TRANSPORT))
@@ -101,45 +112,79 @@ public class Main {
 	}
 
 	private static void deleteAllEvents(String calendarId) throws IOException {
-		SERVICE.calendars().clear(calendarId).execute();
-	}
-
-	private static <T extends Enum<T>> T parseEnumSafe(String str, Class<T> clazz) {
-		try {
-			return Enum.valueOf(clazz, str);
-		} catch (IllegalArgumentException e) {
-			LOGGER.error("Error while parsing enum constants, please make sure you pass one of the following: " + Arrays.deepToString(clazz.getEnumConstants()));
-			throw new IllegalArgumentException("Illegal enum constant passed - please check logs for correct constants!");
+		for (Event event : CalendarUtil.getAllEvents(calendarId)) {
+			LOGGER.info("Deleting event " + event.getSummary() + " from " + TimeUtil.formatEventDateTime(event.getStart()) + " to " + TimeUtil.formatEventDateTime(event.getEnd()));
+			SERVICE.events().delete(calendarId, event.getId()).execute();
 		}
-    }
+
+		LOGGER.info("Finished deleting events from calendar!...");
+	}
 
 	private static String createCalendar() throws IOException {
 		com.google.api.services.calendar.model.Calendar calendar = new com.google.api.services.calendar.model.Calendar();
 		calendar.setSummary(CONFIG.getConfigOption("calendar-name"));
-		calendar.setTimeZone(CONFIG.getConfigOption("time-zone", str -> parseEnumSafe(str, TimeZone.class).getZone()));
+		calendar.setTimeZone(CONFIG.getConfigOption("time-zone", str -> Util.parseEnumSafe(str, TimeZone.class).getZone()));
+		calendar.setDescription(CONFIG.getConfigOption("description"));
 
 		calendar = SERVICE.calendars().insert(calendar).execute();
 
 		return calendar.getId();
 	}
-
 	private static void copyEventsFromCalendarToCalendar(String sourceCalendarId, String destCalendarId) throws IOException {
-		for (Event event : getAllEvents(sourceCalendarId)) {
-			Main.LOGGER.info("Copying event: " + event.getSummary() + " at " + event.getStart());
+		Main.LOGGER.info(String.format("Starting copyEventsFromCalendarToCalendar from %s to %s", sourceCalendarId, destCalendarId));
 
-			boolean archnet = event.getSummary().contains("ArchNet");
+		Map<LocalDate, List<Shift>> archShifts = new HashMap<>();
+		Map<LocalDate, List<Shift>> dcShifts = new HashMap<>();
 
-			String configKey = archnet ? "arch-event-color" : "dc-event-color";
+		List<Event> allEvents = CalendarUtil.getAllEvents(sourceCalendarId);
+		Main.LOGGER.info(String.format("Fetched %s events from source calendar %s", allEvents.size(), sourceCalendarId));
 
-			Event newEvent = new Event()
-				.setSummary(archnet ? "ArchNet" : "Digital Commons")
-				.setDescription(event.getDescription())
-				.setStart(event.getStart())
-				.setEnd(event.getEnd())
-				.setColorId(CONFIG.getConfigOption(configKey, str -> parseEnumSafe(str, EventColor.class).getId()));
+		for (Event event : allEvents) {
+			String summary = event.getSummary();
+			Main.LOGGER.info(String.format("Processing event '%s', start: %s, end: %s",
+					summary, TimeUtil.formatEventDateTime(event.getStart()), TimeUtil.formatEventDateTime(event.getEnd())));
 
-			SERVICE.events().insert(destCalendarId, newEvent).execute();
+			LocalDateTime start = TimeUtil.toLocalDateTime(event.getStart(),
+					CONFIG.getConfigOption("time-zone", str -> ZoneId.of(Util.parseEnumSafe(str, TimeZone.class).getZone())));
+			LocalDateTime end = TimeUtil.toLocalDateTime(event.getEnd(),
+					CONFIG.getConfigOption("time-zone", str -> ZoneId.of(Util.parseEnumSafe(str, TimeZone.class).getZone())));
+
+			LocalDate date = start.toLocalDate();
+			boolean archnet = summary.contains("ArchNet");
+			Map<LocalDate, List<Shift>> shiftMap = archnet ? archShifts : dcShifts;
+
+			List<Shift> intervals = shiftMap.computeIfAbsent(date, k -> new ArrayList<>());
+			Shift mergedInterval = new Shift(start, end);
+
+			List<Shift> newIntervals = new ArrayList<>();
+
+			for (Shift interval : intervals) {
+				if (interval.getStart().isAfter(mergedInterval.getEnd())) {
+					newIntervals.add(mergedInterval);
+					mergedInterval = interval;
+				} else {
+					mergedInterval = new Shift(
+							TimeUtil.minDate(mergedInterval.getStart(), interval.getStart()),
+							TimeUtil.maxDate(mergedInterval.getEnd(), interval.getEnd())
+					);
+				}
+			}
+
+			newIntervals.add(mergedInterval);
+
+
+			shiftMap.put(date, newIntervals);
 		}
+
+		ZoneId timeZone = CONFIG.getConfigOption("time-zone", str -> ZoneId.of(Util.parseEnumSafe(str, TimeZone.class).getZone()));
+
+		Main.LOGGER.info(String.format("Inserting %d ArchNet shifts into destination calendar %s", archShifts.values().stream().mapToInt(List::size).sum(), destCalendarId));
+		CalendarUtil.insertEvents(archShifts, timeZone, destCalendarId, true);
+
+		Main.LOGGER.info(String.format("Inserting %d DC shifts into destination calendar %s", dcShifts.values().stream().mapToInt(List::size).sum(), destCalendarId));
+		CalendarUtil.insertEvents(dcShifts, timeZone, destCalendarId, false);
+
+		Main.LOGGER.info(String.format("Finished copyEventsFromCalendarToCalendar from %s to %s", sourceCalendarId, destCalendarId));
 	}
 
 	private static String getCBECalendarId() throws IOException {
@@ -152,41 +197,6 @@ public class Main {
 		}
 
 		return cbeCalendarId;
-	}
-
-	private static List<Event> getAllEvents(String calendarId) throws IOException {
-		List<Event> items = new ArrayList<>();
-		Events events = SERVICE.events().list(calendarId).execute();
-		while (events != null) {
-			items.addAll(events.getItems());
-
-			if (events.getNextPageToken() != null) {
-				events = SERVICE
-					.events()
-					.list(calendarId)
-					.setPageToken(events.getNextPageToken())
-					.execute();
-			} else {
-				break;
-			}
-		}
-		return items;
-	}
-
-	private static void initConfigs() {
-		try {
-			if (!Files.exists(CONFIG_HOME_DIRECTORY)) {
-				Files.createDirectory(CONFIG_HOME_DIRECTORY);
-			} if (!Files.exists(TOKENS_DIRECTORY_PATH)) {
-				Files.createDirectory(TOKENS_DIRECTORY_PATH);
-			}
-		} catch (IOException e) {
-			Main.LOGGER.error("Unable to create config/token directory at: \"" + CONFIG_HOME_DIRECTORY + "\" or \"" + TOKENS_DIRECTORY_PATH + "\"", e);
-			e.printStackTrace();
-		}
-		if (!Files.exists(CREDENTIALS_FILE_PATH)) {
-			throw new IllegalArgumentException("Credentials file at: \"" + CREDENTIALS_FILE_PATH + "\" not found!");
-		}
 	}
 
 	private static Credential getCredentials(NetHttpTransport transport) throws IOException {
