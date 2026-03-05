@@ -189,15 +189,15 @@ public class Main {
 		Shift currentBand = shifts.get(0);
 
 		for (int i = 1; i < shifts.size(); i++) {
-			Shift nextShift = shifts.get(i);
+			Shift next = shifts.get(i);
 
-			if (!nextShift.getStart().isAfter(currentBand.getEnd())) {
-				if (nextShift.getEnd().isAfter(currentBand.getEnd())) {
-					currentBand = new Shift(currentBand.getStart(), nextShift.getEnd());
+			if (!next.getStart().isAfter(currentBand.getEnd())) {
+				if (next.getEnd().isAfter(currentBand.getEnd())) {
+					currentBand = new Shift(currentBand.getStart(), next.getEnd());
 				}
 			} else {
 				mergedBands.add(currentBand);
-				currentBand = nextShift;
+				currentBand = next;
 			}
 		}
 
