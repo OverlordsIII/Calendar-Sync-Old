@@ -42,6 +42,7 @@ import org.apache.log4j.Logger;
 // if it exists, we don't just want to blindly create a new calendar
 // rather we want to store all the event ids we copied from the old calendar to the new calendar
 // and then iterate through all events and check if those events are in our event id store
+// event id store should be dynamic based on secondary calendar id (so a populated map of json configs)
 // if not, then we add them to our existing calendar
 // otherwise we add all events to a brand new calendar
 // if event was deleted then we also want to track that if its not in the current event store and then remove it
@@ -155,36 +156,53 @@ public class Main {
 
 			List<Shift> intervals = shiftMap.computeIfAbsent(date, k -> new ArrayList<>());
 			Shift mergedInterval = new Shift(start, end);
-
-			List<Shift> newIntervals = new ArrayList<>();
-
-			for (Shift interval : intervals) {
-				if (interval.getStart().isAfter(mergedInterval.getEnd())) {
-					newIntervals.add(mergedInterval);
-					mergedInterval = interval;
-				} else {
-					mergedInterval = new Shift(
-							TimeUtil.minDate(mergedInterval.getStart(), interval.getStart()),
-							TimeUtil.maxDate(mergedInterval.getEnd(), interval.getEnd())
-					);
-				}
-			}
-
-			newIntervals.add(mergedInterval);
-
-
-			shiftMap.put(date, newIntervals);
+			intervals.add(mergedInterval);
 		}
+
+		HashMap<LocalDate, List<Shift>> finalArchShifts = new HashMap<>();
+		archShifts.forEach((localDate, shifts) -> {
+			finalArchShifts.put(localDate, mergeShifts(shifts));
+		});
+
+		HashMap<LocalDate, List<Shift>> finalDcShifts = new HashMap<>();
+		dcShifts.forEach((localDate, shifts) -> {
+			finalDcShifts.put(localDate, mergeShifts(shifts));
+		});
 
 		ZoneId timeZone = CONFIG.getConfigOption("time-zone", str -> ZoneId.of(Util.parseEnumSafe(str, TimeZone.class).getZone()));
 
-		Main.LOGGER.info(String.format("Inserting %d ArchNet shifts into destination calendar %s", archShifts.values().stream().mapToInt(List::size).sum(), destCalendarId));
-		CalendarUtil.insertEvents(archShifts, timeZone, destCalendarId, true);
+		Main.LOGGER.info(String.format("Inserting %d ArchNet shifts into destination calendar %s", finalArchShifts.values().stream().mapToInt(List::size).sum(), destCalendarId));
+		CalendarUtil.insertEvents(finalArchShifts, timeZone, destCalendarId, true);
 
-		Main.LOGGER.info(String.format("Inserting %d DC shifts into destination calendar %s", dcShifts.values().stream().mapToInt(List::size).sum(), destCalendarId));
-		CalendarUtil.insertEvents(dcShifts, timeZone, destCalendarId, false);
+		Main.LOGGER.info(String.format("Inserting %d DC shifts into destination calendar %s", finalDcShifts.values().stream().mapToInt(List::size).sum(), destCalendarId));
+		CalendarUtil.insertEvents(finalDcShifts, timeZone, destCalendarId, false);
 
 		Main.LOGGER.info(String.format("Finished copyEventsFromCalendarToCalendar from %s to %s", sourceCalendarId, destCalendarId));
+	}
+
+	private static List<Shift> mergeShifts(List<Shift> shifts) {
+		if (shifts == null || shifts.isEmpty()) return new ArrayList<>();
+
+		shifts.sort(Comparator.comparing(Shift::getStart));
+
+		List<Shift> mergedBands = new ArrayList<>();
+		Shift currentBand = shifts.get(0);
+
+		for (int i = 1; i < shifts.size(); i++) {
+			Shift nextShift = shifts.get(i);
+
+			if (!nextShift.getStart().isAfter(currentBand.getEnd())) {
+				if (nextShift.getEnd().isAfter(currentBand.getEnd())) {
+					currentBand = new Shift(currentBand.getStart(), nextShift.getEnd());
+				}
+			} else {
+				mergedBands.add(currentBand);
+				currentBand = nextShift;
+			}
+		}
+
+		mergedBands.add(currentBand);
+		return mergedBands;
 	}
 
 	private static String getCBECalendarId() throws IOException {
